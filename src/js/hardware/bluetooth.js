@@ -1,10 +1,37 @@
 "use strict";
 
+/**
+ * @function BtDeviceGroupFactory
+ * @description
+ * This factory function creates an object responsible for managing connections
+ * to various Bluetooth Low Energy (BLE) devices, such as smart cubes and timers.
+ * It abstracts device-specific communication details, allowing for a unified
+ * interface to scan, connect, and interact with different hardware models.
+ *
+ * It maintains a registry of device drivers (`cubeModels`) and handles the
+ * Web Bluetooth API interactions for device discovery and connection.
+ *
+ * @returns {object} An object with methods to manage Bluetooth device connections.
+ */
 function BtDeviceGroupFactory() {
 
-	/* { prefix: cubeModel } */
+	/**
+	 * @private
+	 * @type {object.<string, object>} Stores registered device models (drivers).
+	 * Keys are device name prefixes (e.g., 'GAN', 'QY-Timer'), values are the cubeModel objects.
+	 */
 	var cubeModels = {};
 
+	/**
+	 * @function regCubeModel
+	 * @description
+	 * Registers a new Bluetooth device model (driver) with the factory.
+	 * Device models are typically defined in separate files (e.g., `gancube.js`, `qiyitimer.js`).
+	 *
+	 * @param {object} cubeModel - The device model object to register.
+	 *   Must have a `prefix` property (string or array of strings) for identification.
+	 *   Should also contain `init`, `clear`, `opservs`, `cics`, etc.
+	 */
 	function regCubeModel(cubeModel) {
 		if ($.isArray(cubeModel.prefix)) {
 			cubeModel.prefix.map((prefix) => {
@@ -15,9 +42,26 @@ function BtDeviceGroupFactory() {
 		}
 	}
 
+	/**
+	 * @private
+	 * @type {object|undefined} The currently active device driver (cubeModel) for the connected device.
+	 */
 	var cube = undefined;
+	/**
+	 * @private
+	 * @type {BluetoothDevice|null} The currently connected BluetoothDevice object.
+	 */
 	var _device = null;
 
+	/**
+	 * @function toUuid128
+	 * @description
+	 * Converts a 16-bit UUID string to its full 128-bit Bluetooth UUID format.
+	 * If the input is already a 128-bit UUID, it's returned as is (uppercased).
+	 *
+	 * @param {string} uuid - The UUID string (e.g., "fff0" or "0000fff0-...")
+	 * @returns {string} The 128-bit uppercase UUID string.
+	 */
 	function toUuid128(uuid) {
 		if (/^[0-9A-Fa-f]{4}$/.exec(uuid)) {
 			uuid = "0000" + uuid + "-0000-1000-8000-00805F9B34FB";
@@ -25,6 +69,15 @@ function BtDeviceGroupFactory() {
 		return uuid.toUpperCase();
 	}
 
+	/**
+	 * @function findUUID
+	 * @description
+	 * Searches an array of Bluetooth GATT services or characteristics for one matching a given UUID.
+	 *
+	 * @param {Array<BluetoothService|BluetoothCharacteristic>} elems - Array of services or characteristics.
+	 * @param {string} uuid - The UUID to search for (can be 16-bit or 128-bit).
+	 * @returns {BluetoothService|BluetoothCharacteristic|null} The matching element, or null if not found.
+	 */
 	function findUUID(elems, uuid) {
 		uuid = toUuid128(uuid);
 		for (var i = 0; i < elems.length; i++) {
@@ -36,6 +89,16 @@ function BtDeviceGroupFactory() {
 		return null;
 	}
 
+	/**
+	 * @function waitForAdvs
+	 * @description
+	 * Waits for Bluetooth advertisement packets from the currently selected device.
+	 * This is used to capture manufacturer-specific data (like MAC addresses)
+	 * that might not be available through GATT services directly.
+	 *
+	 * @returns {Promise<DataView>} A promise that resolves with the manufacturer data
+	 *   from the first received advertisement, or rejects after a timeout.
+	 */
 	function waitForAdvs() {
 		if (!_device || !_device.watchAdvertisements) {
 			return Promise.reject(-1);
@@ -58,18 +121,52 @@ function BtDeviceGroupFactory() {
 		});
 	}
 
+	/**
+	 * @function onHardwareEvent
+	 * @description
+	 * A generic handler for hardware-related events, primarily disconnection.
+	 * It stops the current connection and then invokes a registered event callback.
+	 *
+	 * @param {string} info - Type of event (e.g., 'disconnect').
+	 * @param {Event} event - The original event object.
+	 * @returns {Promise<void>} A promise that resolves after stopping and invoking the callback.
+	 */
 	function onHardwareEvent(info, event) {
 		var res = Promise.resolve();
 		if (info == 'disconnect') {
 			res = Promise.resolve(stop(true));
 		}
 		return res.then(function () {
+			// Invoke the external event callback if registered
 			return typeof evtCallback == 'function' && evtCallback(info, event);
 		});
 	}
 
+	/**
+	 * @private
+	 * @type {function(Event): Promise<void>} Bound version of `onHardwareEvent` for 'disconnect'.
+	 */
 	var onDisconnect = onHardwareEvent.bind(null, 'disconnect');
 
+	/**
+	 * @function init
+	 * @description
+	 * Initiates a Bluetooth device connection process.
+	 *
+	 * 1. Checks Web Bluetooth API availability.
+	 * 2. If `reconnect` is true and a device is already selected, attempts to reconnect.
+	 * 3. Builds filters for `requestDevice` based on registered `cubeModels`.
+	 *    - `filters`: Uses `namePrefix` from all registered models.
+	 *    - `optionalServices`: Collects all `opservs` from registered models.
+	 *    - `optionalManufacturerData`: Collects all `cics` (Company Identifier Codes).
+	 * 4. Prompts the user to select a Bluetooth device using `navigator.bluetooth.requestDevice()`.
+	 * 5. Once a device is selected, it stores the device and attaches a `gattserverdisconnected` listener.
+	 * 6. Identifies the appropriate device driver (`cubeModel`) based on the device's name prefix.
+	 * 7. Calls the `init` method of the identified device driver to establish GATT services and characteristics.
+	 *
+	 * @param {boolean} reconnect - If true, attempts to reconnect to a previously selected device.
+	 * @returns {Promise<void>} A promise that resolves when the device is successfully initialized, or rejects on error.
+	 */
 	function init(reconnect) {
 		return giikerutil.chkAvail().then(function() {
 			if (_device && reconnect) {
@@ -103,6 +200,17 @@ function BtDeviceGroupFactory() {
 		});
 	}
 
+	/**
+	 * @function waitUntilDeviceAvailable
+	 * @description
+	 * Waits for the selected Bluetooth device to start sending advertisement packets.
+	 * This is particularly useful for devices that might not immediately advertise
+	 * after being selected, or to ensure the device is truly active.
+	 *
+	 * @param {BluetoothDevice} device - The BluetoothDevice object to monitor.
+	 * @returns {Promise<BluetoothDevice>} A promise that resolves with the device
+	 *   once an advertisement is received, or rejects if the API is not supported.
+	 */
 	// Wait until target device start sending bluetooth advertisiment packets
 	function waitUntilDeviceAvailable(device) {
 		var abortController = new AbortController();
@@ -130,10 +238,24 @@ function BtDeviceGroupFactory() {
 		});
 	}
 
+	/**
+	 * @function stop
+	 * @description
+	 * Disconnects from the currently connected Bluetooth device.
+	 *
+	 * 1. Calls the `clear` method of the active device driver for device-specific cleanup.
+	 * 2. Removes the `gattserverdisconnected` event listener.
+	 * 3. Disconnects the GATT server.
+	 * 4. Resets the internal `_device` state.
+	 *
+	 * @param {boolean} isHardwareEvent - True if the disconnection was triggered by a hardware event (e.g., actual device power-off).
+	 * @returns {Promise<void>} A promise that resolves when the disconnection is complete.
+	 */
 	function stop(isHardwareEvent) {
 		if (!_device) {
 			return Promise.resolve();
 		}
+		// Call the device-specific clear function, then disconnect GATT and clean up.
 		return Promise.resolve(cube && cube.clear(isHardwareEvent)).then(function () {
 			_device.removeEventListener('gattserverdisconnected', onDisconnect);
 			_device.gatt.disconnect();
@@ -141,18 +263,42 @@ function BtDeviceGroupFactory() {
 		});
 	}
 
+	/**
+	 * @private
+	 * @type {function(...any): void} A callback function to send data from the device driver
+	 *   back to the main application logic. Initialized as a no-op.
+	 */
 	var callback = $.noop;
+	/**
+	 * @private
+	 * @type {function(string, Event): void} A callback function to send event notifications
+	 *   (like disconnection) from the device driver back to the main application logic. Initialized as a no-op.
+	 */
 	var evtCallback = $.noop;
 
 	return {
 		init: init,
 		stop: stop,
+		/**
+		 * @public
+		 * @returns {boolean} True if a device is currently connected or if DEBUGBL is enabled.
+		 */
 		isConnected: function() {
 			return _device != null || DEBUGBL;
 		},
+		/**
+		 * @public
+		 * Sets the main data callback function.
+		 * @param {function(...any): void} func - The function to call with device data.
+		 */
 		setCallback: function(func) {
 			callback = func;
 		},
+		/**
+		 * @public
+		 * Sets the event callback function.
+		 * @param {function(string, Event): void} func - The function to call with device events.
+		 */
 		setEventCallback: function(func) {
 			evtCallback = func;
 		},
@@ -165,14 +311,22 @@ function BtDeviceGroupFactory() {
 		findUUID: findUUID,
 		waitForAdvs: waitForAdvs,
 		onDisconnect: onDisconnect,
+		/**
+		 * @public
+		 * Invokes the registered `callback` function with provided arguments.
+		 * This is typically used by device drivers to send data back.
+		 * @param {...any} args - Arguments to pass to the callback.
+		 * @returns {any} The result of the callback function.
+		 */
 		callback: function() {
 			return callback.apply(null, arguments);
 		}
 	};
 }
 
+// Instantiate the factory for smart cubes.
 var GiikerCube = execMain(BtDeviceGroupFactory);
-
+// Instantiate the factory for Bluetooth timers.
 var BluetoothTimer = execMain(BtDeviceGroupFactory);
 
 BluetoothTimer.CONST = (function() {
